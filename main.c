@@ -100,7 +100,9 @@ int main (int argc, char **argv)
 	printf("Channel is enabled> tx0_q:%d, tx0_i:%d.\n", iio_channel_is_enabled(tx0_q), iio_channel_is_enabled(tx0_i));
 	printf("Channel is output> tx0_q:%d, tx0_i:%d.\n", iio_channel_is_output(tx0_q), iio_channel_is_output(tx0_i));
 
-	
+	iio_device_set_kernel_buffers_count(lpc_rx_device, 2);
+	iio_device_set_kernel_buffers_count(lpc_tx_device, 2);
+
 	printf("Creating receive buffer.\n");
   struct iio_buffer* rxbuf;
 	rxbuf = iio_device_create_buffer(lpc_rx_device, buffer_size, false);
@@ -139,6 +141,10 @@ int main (int argc, char **argv)
   printf("Processing start...\n");
 	size_t nbytes_tx_q = iio_channel_write(tx0_q, txbuf, tx_real, buffer_size*sizeof(int16_t));
 	size_t nbytes_tx_i = iio_channel_write(tx0_i, txbuf, tx_imag, buffer_size*sizeof(int16_t));
+
+	iio_buffer_push(txbuf);
+	iio_buffer_push(txbuf);
+	iio_buffer_push(txbuf);
 
 	for(int i=0;i<20;i++) {
 		iio_buffer_push(txbuf);
