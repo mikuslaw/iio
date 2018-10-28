@@ -22,20 +22,20 @@ struct notification {
 	bool run;
 };
 
-void rx_thread(const struct iio_channel *chn_q, const struct iio_channel *chn_i, struct iio_buffer *buf, size_t buffer_size, int16_t* real, int16_t* imag, struct notification* notify);
+void rx_thread(const struct iio_channel *chn_q, const struct iio_channel *chn_i, struct iio_buffer *buf, size_t buffer_size, int16_t* real, int16_t* imag, struct notification* notify, struct iio_channel* tx_lo, struct iio_channel* rx_lo);
 void tx_thread(const struct iio_channel *chn_q, const struct iio_channel *chn_i, struct iio_buffer *buf, size_t buffer_size, int16_t* real, int16_t* imag, struct notification* notify);
 
 size_t buffer_size = 32*1024;
 long long loopback = 1;
-long long buffer_count = 128;
+long long buffer_count = 32;
 long long sampling_rate = 2500000;
 long long notify_cnt 		= 2500000;
 long long frequency_start = 1000000000;
-long long frequency_step = 100000000;
+long long frequency_step = 20000000;
 long long frequency_steps = 10;
 int current_step = 0;
 
-long long iterations_max = (sampling_rate*20)/buffer_size;
+long long iterations_max = (sampling_rate*200)/buffer_size;
 
 int main (int argc, char **argv)
 {
@@ -174,17 +174,25 @@ int main (int argc, char **argv)
 	struct notification notify;
 	notify.run = false;
 
-	std::thread rx_th(&rx_thread, rx0_q, rx0_i, rxbuf, buffer_size, rx_real, rx_imag, &notify);
+	std::thread rx_th(&rx_thread, rx0_q, rx0_i, rxbuf, buffer_size, rx_real, rx_imag, &notify, tx_channel_lo, rx_channel_lo);
 	std::thread tx_th(&tx_thread, tx0_q, tx0_i, txbuf, buffer_size, tx_real, tx_imag, &notify);
 
-	std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+	std::this_thread::sleep_for(std::chrono::milliseconds(3000));
 	printf("After wait.\n");
 	{
 		std::unique_lock<std::mutex> lk(notify.mtx);
 		notify.run = true;
-   	notify.cv.notify_all();
+   		notify.cv.notify_all();
 	}
-	
+
+	// for(int j=0;j<frequency_steps;j++) {
+	// 	std::this_thread::sleep_for(std::chrono::milliseconds(5000));
+	// 	int current_step = j;
+	// 	iio_channel_attr_write_longlong(tx_channel_lo, "frequency", frequency_start + current_step * frequency_step); /* RX LO frequency 2.4GHz */
+	// 	iio_channel_attr_write_longlong(rx_channel_lo, "frequency", frequency_start + current_step * frequency_step); /* RX LO frequency 2.4GHz */
+	//  	printf("RX: frequency shift: %lld\n", frequency_start + current_step * frequency_step);
+	// }
+
 	rx_th.join();
 	tx_th.join();
 	printf("Processing end.\n");
@@ -213,7 +221,7 @@ int main (int argc, char **argv)
 }
 
 
-void rx_thread(const struct iio_channel *chn_q, const struct iio_channel *chn_i, struct iio_buffer *buf, size_t buffer_size, int16_t* real, int16_t* imag, struct notification* notify) {
+void rx_thread(const struct iio_channel *chn_q, const struct iio_channel *chn_i, struct iio_buffer *buf, size_t buffer_size, int16_t* real, int16_t* imag, struct notification* notify, struct iio_channel* tx_lo, struct iio_channel* rx_lo) {
 	printf("Enter rx.\n");
 	{
 		std::unique_lock<std::mutex> lock(notify->mtx);
@@ -233,23 +241,27 @@ void rx_thread(const struct iio_channel *chn_q, const struct iio_channel *chn_i,
 		auto refill_end = std::chrono::high_resolution_clock::now();
 		std::chrono::nanoseconds refill_dur = refill_end - refill_start;
 		//std::cout << "Duration of iio_buffer_refill(" << rx_bytes << "): " << refill_dur.count() << "ns.\n";
-	}
-
-	if (((i*buffer_size) % notify_cnt) < buffer_size) {
-		// Service receive.
-		size_t nbytes_rx_q = iio_channel_read(chn_q, buf, real, buffer_size*sizeof(int16_t));
-		size_t nbytes_rx_i = iio_channel_read(chn_i, buf, imag, buffer_size*sizeof(int16_t));
-		for(int i=0;i<buffer_size;i++) {
-			real[i] = real[i]<<4;
-			imag[i] = imag[i]<<4;
-		}
-		double amplitude, phase;
-		calculate_amplitude_and_phase(real, imag, buffer_size, 1, amplitude, phase);
-		printf("Received rx. [In] Amplitude: %f, Phase: %f.\n", amplitude, phase);
-		// printf("Read rx samples. Re: %ld, Im: %ld.\n", nbytes_rx_q, nbytes_rx_i);
-	}
-	if ((((i*buffer_size) % notify_cnt) < buffer_size*10) && (((i*buffer_size) % notify_cnt) >= buffer_size*9)) {
 	
+
+		if (((i*buffer_size) % notify_cnt) <= buffer_size) {
+			// Service receive.
+			size_t nbytes_rx_q = iio_channel_read(chn_q, buf, real, buffer_size*sizeof(int16_t));
+			size_t nbytes_rx_i = iio_channel_read(chn_i, buf, imag, buffer_size*sizeof(int16_t));
+			for(int i=0;i<buffer_size;i++) {
+				real[i] = real[i]<<4;
+				imag[i] = imag[i]<<4;
+			}
+			double amplitude, phase;
+			calculate_amplitude_and_phase(real, imag, buffer_size, 1, amplitude, phase);
+			printf("Received rx. [In] Amplitude: %f, Phase: %f.\n", amplitude, phase);
+			// printf("Read rx samples. Re: %ld, Im: %ld.\n", nbytes_rx_q, nbytes_rx_i);
+		}
+		// if (((i*buffer_size) % (notify_cnt*10)) <= buffer_size) {
+		// 	current_step++;
+		// 	iio_channel_attr_write_longlong(tx_lo, "frequency", frequency_start + current_step * frequency_step); /* RX LO frequency 2.4GHz */
+		// 	iio_channel_attr_write_longlong(rx_lo, "frequency", frequency_start + current_step * frequency_step); /* RX LO frequency 2.4GHz */
+		// 	printf("RX: frequency shift: %lld\n", frequency_start + current_step * frequency_step);
+		// }
 	}
 	auto rx_end = std::chrono::high_resolution_clock::now();
 	std::chrono::nanoseconds rx_dur = rx_end - rx_start;
@@ -261,7 +273,7 @@ void tx_thread(const struct iio_channel *chn_q, const struct iio_channel *chn_i,
 	{
 		std::unique_lock<std::mutex> lock(notify->mtx);
 		while(!notify->run) {
-   		notify->cv.wait(lock);
+   			notify->cv.wait(lock);
 		}
 	}
 	auto tx_start = std::chrono::high_resolution_clock::now();
