@@ -1,28 +1,16 @@
 #include <stdio.h>
 #include <iio.h>
+#include <thread>
 #include <cstring>
 #include <cmath>
 #include <chrono>
 #include <fftw3.h>
 #include <stdio.h>
 
-#include <thread>
-#include <condition_variable>
-
-
 int process(struct iio_buffer* rxbuf, struct iio_buffer* txbuf);
 int prepare_sine(int16_t* re, int16_t* im, size_t size);
 void print_complex_vector(const fftw_complex* vec, const size_t size);
 int calculate_amplitude_and_phase(int16_t* re, int16_t* im, size_t size, int mult, double &real, double &imaginary);
-
-struct notification {
-	std::condition_variable cv;
-	std::mutex mtx;
-	bool run;
-};
-
-void rx_thread(const struct iio_channel *chn_q, const struct iio_channel *chn_i, struct iio_buffer *buf, size_t buffer_size, int16_t* real, int16_t* imag, struct notification* notify);
-void tx_thread(const struct iio_channel *chn_q, const struct iio_channel *chn_i, struct iio_buffer *buf, size_t buffer_size, int16_t* real, int16_t* imag, struct notification* notify);
 
 int main (int argc, char **argv)
 {
@@ -31,24 +19,23 @@ int main (int argc, char **argv)
 	long long sampling_rate = 1000000;
 
   printf("Opening contex.\n");
-	struct iio_context* rx_ctx = iio_create_context_from_uri("ip:pluto.local");
-	struct iio_context* tx_ctx = iio_context_clone(rx_ctx);
+	struct iio_context* ctx = iio_create_context_from_uri("ip:pluto.local");
   printf("Opened contex.\n");
  
   printf("Opening phy device.\n");
-	struct iio_device* phy_device = iio_context_find_device(rx_ctx, "ad9361-phy");
+	struct iio_device* phy_device = iio_context_find_device(ctx, "ad9361-phy");
   printf("Opened phy device.\n");
 
   printf("Opening dds device.\n");
-	struct iio_device* dds_device = iio_context_find_device(tx_ctx, "dds");
+	struct iio_device* dds_device = iio_context_find_device(ctx, "dds");
 	printf("Opened dds device.\n");
 
   printf("Opening lpc devices.\n");
-	struct iio_device* lpc_rx_device = iio_context_find_device(rx_ctx, "cf-ad9361-lpc");
+	struct iio_device* lpc_rx_device = iio_context_find_device(ctx, "cf-ad9361-lpc");
 	if(lpc_rx_device==NULL) {
 		printf("Couldn't open lpc_rx device.\n");
 	}
-	struct iio_device* lpc_tx_device = iio_context_find_device(tx_ctx, "cf-ad9361-dds-core-lpc");
+	struct iio_device* lpc_tx_device = iio_context_find_device(ctx, "cf-ad9361-dds-core-lpc");
 	if(lpc_tx_device==NULL) {
 		printf("Couldn't open lpc_tx device.\n");
 	}
@@ -113,8 +100,8 @@ int main (int argc, char **argv)
 	printf("Channel is enabled> tx0_q:%d, tx0_i:%d.\n", iio_channel_is_enabled(tx0_q), iio_channel_is_enabled(tx0_i));
 	printf("Channel is output> tx0_q:%d, tx0_i:%d.\n", iio_channel_is_output(tx0_q), iio_channel_is_output(tx0_i));
 
-	//iio_device_set_kernel_buffers_count(lpc_rx_device, 2);
-	//iio_device_set_kernel_buffers_count(lpc_tx_device, 2);
+	iio_device_set_kernel_buffers_count(lpc_rx_device, 128);
+	iio_device_set_kernel_buffers_count(lpc_tx_device, 128);
 
 	printf("Creating receive buffer.\n");
   struct iio_buffer* rxbuf;
@@ -143,7 +130,7 @@ int main (int argc, char **argv)
 
 	// Calculate input sinewave 
 	double amplitude, phase;
-	calculate_amplitude_and_phase(tx_real, tx_imag, buffer_size, 4, amplitude, phase);
+	calculate_amplitude_and_phase(tx_real, tx_imag, buffer_size, 1, amplitude, phase);
 	printf("Prepared tx. [Out] Amplitude: %f, Phase: %f.\n", amplitude, phase);
 
 	printf("Preparing place for rx samples.\n");
@@ -155,23 +142,31 @@ int main (int argc, char **argv)
 	size_t nbytes_tx_q = iio_channel_write(tx0_q, txbuf, tx_real, buffer_size*sizeof(int16_t));
 	size_t nbytes_tx_i = iio_channel_write(tx0_i, txbuf, tx_imag, buffer_size*sizeof(int16_t));
 
-	struct notification notify;
-	notify.run = false;
-
-	std::thread rx_th(&rx_thread, rx0_q, rx0_i, rxbuf, buffer_size, rx_real, rx_imag, &notify);
-	std::thread tx_th(&tx_thread, tx0_q, tx0_i, txbuf, buffer_size, tx_real, tx_imag, &notify);
 	iio_buffer_push(txbuf);
-	std::this_thread::sleep_for(std::chrono::milliseconds(3000));
-	printf("After wait.\n");
+	iio_buffer_push(txbuf);
+	iio_buffer_push(txbuf);
+	iio_buffer_push(txbuf);
+	iio_buffer_push(txbuf);
+	iio_buffer_push(txbuf);
+	iio_buffer_push(txbuf);
+	iio_buffer_push(txbuf);
+	iio_buffer_push(txbuf);
 
-	{
-		std::unique_lock<std::mutex> lk(notify.mtx);
-		notify.run = true;
-   	notify.cv.notify_all();
+	for(int i=0;i<200;i++) {
+		iio_buffer_push(txbuf);
+		iio_buffer_refill(rxbuf);
+
+		// Grab 10th buffer for display.
+		if (i==20) {
+			// Service receive.
+			size_t nbytes_rx_q = iio_channel_read(rx0_q, rxbuf, rx_real, buffer_size*sizeof(int16_t));
+			size_t nbytes_rx_i = iio_channel_read(rx0_i, rxbuf, rx_imag, buffer_size*sizeof(int16_t));
+			// printf("Read rx samples. Re: %ld, Im: %ld.\n", nbytes_rx_q, nbytes_rx_i);
+		}	
+		size_t nbytes_tx_q = iio_channel_write(tx0_q, txbuf, tx_real, buffer_size*sizeof(int16_t));
+		size_t nbytes_tx_i = iio_channel_write(tx0_i, txbuf, tx_imag, buffer_size*sizeof(int16_t));
+		// printf("Stored tx samples. Re: %ld, Im: %ld.\n", nbytes_tx_q, nbytes_tx_i);
 	}
-	
-	rx_th.join();
-	tx_th.join();
 	printf("Processing end.\n");
 
 	for(int i=0;i<buffer_size;i++) {
@@ -179,7 +174,7 @@ int main (int argc, char **argv)
 		rx_imag[i] = rx_imag[i]<<4;
 	}
 
-	calculate_amplitude_and_phase(rx_real, rx_imag, buffer_size/4, 1, amplitude, phase);
+	calculate_amplitude_and_phase(rx_real, rx_imag, buffer_size, 1, amplitude, phase);
 	printf("Received rx. [In] Amplitude: %f, Phase: %f.\n", amplitude, phase);
 
 	printf("Print both buffers.\n\n");
@@ -191,8 +186,7 @@ int main (int argc, char **argv)
 
 	iio_buffer_destroy(rxbuf); 
 	iio_buffer_destroy(txbuf); 
-	iio_context_destroy(rx_ctx);
-	iio_context_destroy(tx_ctx);
+	iio_context_destroy(ctx);
 
 	delete[] rx_real;
 	delete[] rx_imag;
@@ -200,57 +194,7 @@ int main (int argc, char **argv)
 	delete[] tx_imag;
  
 	return 0;
-}
-
-
-void rx_thread(const struct iio_channel *chn_q, const struct iio_channel *chn_i, struct iio_buffer *buf, size_t buffer_size, int16_t* real, int16_t* imag, struct notification* notify) {
-	printf("Enter rx.\n");
-	{
-		std::unique_lock<std::mutex> lock(notify->mtx);
-		while(!notify->run) {
-   		notify->cv.wait(lock);
-		}
-	}
-	printf("Start rx.\n");
-	for(int i=0;i<200;i++) {
-		//{
-		//	std::unique_lock<std::mutex> lock(notify->mtx);
-			iio_buffer_refill(buf);
-		//}
-
-		// Grab 10th buffer for display.
-		if (i==100) {
-			// Service receive.
-			size_t nbytes_rx_q = iio_channel_read(chn_q, buf, real, buffer_size*sizeof(int16_t));
-			size_t nbytes_rx_i = iio_channel_read(chn_i, buf, imag, buffer_size*sizeof(int16_t));
-			// printf("Read rx samples. Re: %ld, Im: %ld.\n", nbytes_rx_q, nbytes_rx_i);
-		}
-	}
-	printf("End rx.\n");
-}
-
-void tx_thread(const struct iio_channel *chn_q, const struct iio_channel *chn_i, struct iio_buffer *buf, size_t buffer_size, int16_t* real, int16_t* imag, struct notification* notify) {
-	printf("Enter tx.\n");
-	{
-		std::unique_lock<std::mutex> lock(notify->mtx);
-		while(!notify->run) {
-   		notify->cv.wait(lock);
-		}
-	}
-
-	printf("Start tx.\n");
-	for(int i=0;i<200;i++) {
-		ssize_t tx_bytes;
-		//{
-		//	std::unique_lock<std::mutex> lock(notify->mtx);
-			tx_bytes = iio_buffer_push(buf);
-		//}
-		size_t nbytes_tx_q = iio_channel_write(chn_q, buf, real, buffer_size*sizeof(int16_t));
-		size_t nbytes_tx_i = iio_channel_write(chn_i, buf, imag, buffer_size*sizeof(int16_t));
-		//printf("Pushed tx samples %ld. Re: %ld, Im: %ld.\n", tx_bytes, nbytes_tx_q, nbytes_tx_i);
-	}
-	printf("End tx.\n");
-}
+} 
 
 int calculate_amplitude_and_phase(int16_t* re, int16_t* im, size_t size, int mult, double &mag, double &phase) {
   fftw_complex *in, *out;
@@ -287,7 +231,7 @@ int calculate_amplitude_and_phase(int16_t* re, int16_t* im, size_t size, int mul
 }
 
 int prepare_sine(int16_t* re, int16_t* im, size_t size) {
-  const int mult = 4;
+  const int mult = 1;
   const int sin_idx = mult;
   fftw_complex *in, *out;
   fftw_plan my_plan;
